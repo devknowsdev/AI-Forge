@@ -17,14 +17,18 @@ export async function execute(input: string) {
  try {
  await eventBus.publish(createRuntimeEvent('TaskReceived',{executionId}));
  const route = await routeTask(input);
+ metrics.increment('tasksRouted');
  context.route = route; await eventBus.publish(createRuntimeEvent('TaskRouted',{executionId,route}));
  context.state = RuntimeState.EXECUTING;
  const result = await scheduler.run(() => executeModel(route.executor, input));
  await eventBus.publish(createRuntimeEvent('TaskExecuted',{executionId}));
- context.state = RuntimeState.VALIDATING; runtimeValidator.validate(result); metrics.increment('tasksValidated');
+ context.state = RuntimeState.VALIDATING;
+ try { runtimeValidator.validate(result); } catch(error){ metrics.increment('taskValidationFailures'); throw error; }
+ metrics.increment('tasksValidated');
  await eventBus.publish(createRuntimeEvent('TaskValidated',{executionId}));
  context.state = RuntimeState.PERSISTING;
  await ledgerStore.append({id:executionId,timestamp:new Date().toISOString(),request:context.request,route,result});
+ metrics.increment('tasksPersisted');
  await eventBus.publish(createRuntimeEvent('TaskPersisted',{executionId}));
  metrics.increment('tasksExecuted');
  context.status = ExecutionStatus.COMPLETED; context.result=result;
