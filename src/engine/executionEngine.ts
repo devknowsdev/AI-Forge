@@ -21,6 +21,7 @@ import { LocalModelLock } from "./modelLock.js";
 import { selectModel as selectOllamaModel } from "../executors/ollama.js";
 import { ControlSurface } from "../core/ControlSurface.js";
 import { TaskGraphContract } from "../taskGraph/graphContract.js";
+import { RunStore } from "../memory/runStore.js";
 
 export interface EngineOptions {
   dbPath: string;
@@ -57,6 +58,7 @@ export class ExecutionEngine {
   private fallbackOnFailure: boolean;
   private control: ControlSurface;
   private contract: TaskGraphContract;
+  private runStore: RunStore;
 
   constructor(opts: EngineOptions) {
     this.workDir = opts.workDir;
@@ -74,6 +76,7 @@ export class ExecutionEngine {
 
     this.control = new ControlSurface();
     this.contract = new TaskGraphContract();
+    this.runStore = new RunStore(this.workDir);
   }
 
   async init(): Promise<void> {
@@ -82,6 +85,7 @@ export class ExecutionEngine {
 
   async run(graph: TaskGraph, mode: ExecutionMode = "sequential"): Promise<NodeRunLog[]> {
     const logs: NodeRunLog[] = [];
+    const runId = crypto.randomUUID();
 
     this.control.validate(graph);
     this.contract.validate(graph);
@@ -91,13 +95,13 @@ export class ExecutionEngine {
       while (!frozenGraph.isSettled()) {
         const ready = frozenGraph.readyNodeIds();
         if (ready.length === 0) break;
-        logs.push(await this.runNode(frozenGraph, ready[0]));
+        logs.push(await this.runNode(frozenGraph, ready[0], runId));
       }
     } else {
       while (!frozenGraph.isSettled()) {
         const ready = frozenGraph.readyNodeIds();
         if (ready.length === 0) break;
-        const batch = await Promise.all(ready.map((id) => this.runNode(frozenGraph, id)));
+        const batch = await Promise.all(ready.map((id) => this.runNode(frozenGraph, id, runId)));
         logs.push(...batch);
       }
     }
@@ -106,7 +110,7 @@ export class ExecutionEngine {
     return logs;
   }
 
-  private async runNode(graph: TaskGraph, nodeId: string): Promise<NodeRunLog> {
+  private async runNode(graph: TaskGraph, nodeId: string, runId: string): Promise<NodeRunLog> {
     const node = graph.get(nodeId);
     graph.setStatus(nodeId, "running");
     const packet = node.packet;
@@ -156,10 +160,7 @@ export class ExecutionEngine {
             chainTried = [...(chainTried ?? []), ...decision.chainTried];
             if (!decision.executor) break;
             const retry = await this.executeViaRoute(packet, decision.executor);
-            result = {
-              ...retry,
-              error: result.error ? `${result.error}; then ${retry.error ?? "failed"}` : retry.error,
-            };
+            result = { ...retry };
           }
 
           this.ledger.recordUsage(result.provider, { cost: result.cost });
@@ -203,6 +204,18 @@ export class ExecutionEngine {
       };
 
       this.taskHistory.recordOutcome(outcome);
+
+      this.runStore.append({
+        runId,
+        timestamp: Date.now(),
+        nodeId,
+        status: result.success ? "success" : "failed",
+        provider: result.provider,
+        cacheHit: !!result.cacheHit,
+        cost: result.cost,
+        latencyMs: result.latencyMs,
+        error: result.error,
+      });
 
       if (!result.cacheHit) {
         this.learningLoop.recordOutcome(outcome);
