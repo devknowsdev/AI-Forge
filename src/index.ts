@@ -20,3 +20,9 @@ export { loadForgeConfig, ensureForgeDirs, exampleConfigPath, defaultForgePaths 
 export type { ForgeConfig } from "./config/loadConfig.js";
 export { probeAllProviders, applyProviderProbe } from "./config/providerProbe.js";
 export type { ProviderStatus } from "./config/providerProbe.js";
+export type { Capability } from './capabilities/Capability.js';
+export type { CapabilityRequest } from './capabilities/CapabilityRequest.js';
+export type { CapabilityResult } from './capabilities/CapabilityResult.js';
+export type { CapabilityRegistry } from './capabilities/CapabilityRegistry.js';
+export { InMemoryCapabilityRegistry } from './capabilities/InMemoryCapabilityRegistry.js';
+export { vibeCodingCapability, fileManagementCapability, audioProcessingCapability } from './capabilities/builtins.js';
