@@ -3,6 +3,7 @@
 import { Command } from "commander";
 import { runCommand } from "./run.js";
 import { planCommand } from "./plan.js";
+import { logsCommand } from "./logs.js";
 
 const program = new Command();
 
@@ -25,6 +26,14 @@ program
   .description("Generate and preview execution graph")
   .action(async (intent: string) => {
     await planCommand(intent);
+  });
+
+program
+  .command("logs")
+  .argument("[runId]")
+  .description("Inspect execution logs or a specific run")
+  .action(async (runId?: string) => {
+    await logsCommand(runId);
   });
 
 program.parse();
