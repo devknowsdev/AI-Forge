@@ -19,6 +19,8 @@ export async function execute(input: string) {
  const route = await routeTask(input);
  metrics.increment('tasksRouted');
  context.route = route; await eventBus.publish(createRuntimeEvent('TaskRouted',{executionId,route}));
+ context.state = RuntimeState.SCHEDULED;
+ await eventBus.publish(createRuntimeEvent('TaskScheduled',{executionId}));
  context.state = RuntimeState.EXECUTING;
  const result = await scheduler.run(() => executeModel(route.executor, input));
  await eventBus.publish(createRuntimeEvent('TaskExecuted',{executionId}));
