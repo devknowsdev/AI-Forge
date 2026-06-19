@@ -12,5 +12,6 @@ export const RuntimeEvents = {
   TaskScheduled: 'TaskScheduled',
   TaskExecuted: 'TaskExecuted',
   TaskValidated: 'TaskValidated',
+  TaskPersisted: 'TaskPersisted',
   TaskFailed: 'TaskFailed'
 } as const;
