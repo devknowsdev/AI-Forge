@@ -20,6 +20,7 @@ import { FileLockManager } from "./fileLock.js";
 import { LocalModelLock } from "./modelLock.js";
 import { selectModel as selectOllamaModel } from "../executors/ollama.js";
 import { ControlSurface } from "../core/ControlSurface.js";
+import { TaskGraphContract } from "../taskGraph/graphContract.js";
 
 export interface EngineOptions {
   dbPath: string;
@@ -55,6 +56,7 @@ export class ExecutionEngine {
   private workDir: string;
   private fallbackOnFailure: boolean;
   private control: ControlSurface;
+  private contract: TaskGraphContract;
 
   constructor(opts: EngineOptions) {
     this.workDir = opts.workDir;
@@ -71,6 +73,7 @@ export class ExecutionEngine {
     this.executors = buildExecutorRegistry({ mock: opts.mockExecutors });
 
     this.control = new ControlSurface();
+    this.contract = new TaskGraphContract();
   }
 
   async init(): Promise<void> {
@@ -81,6 +84,7 @@ export class ExecutionEngine {
     const logs: NodeRunLog[] = [];
 
     this.control.validate(graph);
+    this.contract.validate(graph);
     const frozenGraph = this.control.begin(graph);
 
     if (mode === "sequential") {
