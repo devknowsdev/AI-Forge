@@ -1,30 +1,7 @@
 // src/engine/executionEngine.ts
 //
 // Canonical node lifecycle (01_ARCHITECTURE.md / 05_EXECUTION_ENGINE.md /
-// 12_FINAL_SYSTEM_SPEC.md), all docs describe the same sequence:
-//
-//   Node -> pattern cache check (06, skips AI call entirely on a hit)
-//        -> check cost/quota ledger (06) -> route (03)
-//        -> execute -> checkpoint (07) -> validate (07, automated)
-//        -> commit (keep checkpoint) or rollback (revert checkpoint, mark
-//           direct dependents blocked — 04)
-//        -> store in Memory (06) -> feed learning loop (11, skipped on cache
-//           hits — see below)
-//
-// Cache-hit specifics (judgment calls the spec doesn't spell out, flagged
-// here rather than buried in code):
-//   - Skipped entirely for node_type "terminal": shell commands are
-//     side-effecting and not safely replayable from a cached "output", so
-//     terminal nodes always execute for real.
-//   - A hit skips ledger consumption (no call was made, so no RPM/RPD/$
-//     spent) and skips validate()'s build/test re-run (the cached output
-//     already passed validation when it was first stored — see
-//     PatternCache.set, only ever called after a successful validate()).
-//   - A hit is still git-checkpointed and written to task_history /
-//     execution_logs (cache_hit=1, cost=0) so the audit trail and per-project
-//     history stay complete, but it does NOT feed the learning loop —
-//     crediting a provider with a free win it didn't actually do would
-//     distort routing_weights' success/cost/latency averages.
+// 12_FINAL_SYSTEM_SPEC.md)
 
 import type { ExecutionMode, ExecutionResult, ExecutorName, NodeOutcome, TaskPacket } from "../types.js";
 import { dataBoundaryFor } from "../types.js";
@@ -42,17 +19,13 @@ import { applyPatch } from "../safety/patch.js";
 import { FileLockManager } from "./fileLock.js";
 import { LocalModelLock } from "./modelLock.js";
 import { selectModel as selectOllamaModel } from "../executors/ollama.js";
+import { ControlSurface } from "../core/ControlSurface.js";
 
 export interface EngineOptions {
   dbPath: string;
   workDir: string;
-  /** Real local hot-swap cost per Local_AI_Developer_Stack.docx is ~10s;
-   *  defaults to that. Tests/demos override with a small value for speed —
-   *  see modelLock.ts for why this exists at all. */
   ollamaSwapDelayMs?: number;
-  /** Use mock executors (tests). */
   mockExecutors?: boolean;
-  /** Retry the next tier when an executor call fails (CLI default: true). */
   fallbackOnFailure?: boolean;
 }
 
@@ -76,14 +49,17 @@ export class ExecutionEngine {
   readonly router: Router;
   readonly checkpoints: CheckpointManager;
   readonly modelLock: LocalModelLock;
+
   private executors = buildExecutorRegistry();
   private fileLocks = new FileLockManager();
   private workDir: string;
   private fallbackOnFailure: boolean;
+  private control: ControlSurface;
 
   constructor(opts: EngineOptions) {
     this.workDir = opts.workDir;
     this.fallbackOnFailure = opts.fallbackOnFailure ?? false;
+
     this.memory = new MemoryDB(opts.dbPath);
     this.ledger = new Ledger(this.memory);
     this.patternCache = new PatternCache(this.memory);
@@ -93,6 +69,8 @@ export class ExecutionEngine {
     this.checkpoints = new CheckpointManager(this.workDir);
     this.modelLock = new LocalModelLock(opts.ollamaSwapDelayMs);
     this.executors = buildExecutorRegistry({ mock: opts.mockExecutors });
+
+    this.control = new ControlSurface();
   }
 
   async init(): Promise<void> {
@@ -101,24 +79,26 @@ export class ExecutionEngine {
 
   async run(graph: TaskGraph, mode: ExecutionMode = "sequential"): Promise<NodeRunLog[]> {
     const logs: NodeRunLog[] = [];
+
+    this.control.validate(graph);
+    const frozenGraph = this.control.begin(graph);
+
     if (mode === "sequential") {
-      while (!graph.isSettled()) {
-        const ready = graph.readyNodeIds();
+      while (!frozenGraph.isSettled()) {
+        const ready = frozenGraph.readyNodeIds();
         if (ready.length === 0) break;
-        logs.push(await this.runNode(graph, ready[0]));
+        logs.push(await this.runNode(frozenGraph, ready[0]));
       }
     } else {
-      // parallel & optimized: run every currently-ready node concurrently.
-      // "optimized" is currently an alias for "parallel" — true cost/latency-
-      // aware scheduling (e.g. prioritizing cheap nodes first under a shared
-      // budget) is future scope; flagging rather than pretending it's done.
-      while (!graph.isSettled()) {
-        const ready = graph.readyNodeIds();
+      while (!frozenGraph.isSettled()) {
+        const ready = frozenGraph.readyNodeIds();
         if (ready.length === 0) break;
-        const batch = await Promise.all(ready.map((id) => this.runNode(graph, id)));
+        const batch = await Promise.all(ready.map((id) => this.runNode(frozenGraph, id)));
         logs.push(...batch);
       }
     }
+
+    this.control.end();
     return logs;
   }
 
@@ -182,11 +162,6 @@ export class ExecutionEngine {
         }
       }
 
-      // Diff-based patching (07): apply any proposed file edits to the
-      // working tree BEFORE checkpointing — the checkpoint commit captures
-      // whatever's on disk, so applying has to happen first. A bad patch
-      // (e.g. a path escaping workDir) is a failure of THIS node, not a
-      // crash of the engine — same fail/rollback path as any other error.
       if (result.patch) {
         try {
           applyPatch(this.workDir, result.patch);
@@ -195,15 +170,13 @@ export class ExecutionEngine {
         }
       }
 
-      await this.checkpoints.checkpoint(
-        nodeId,
-        result.patch?.edits.map((e) => e.path)
-      );
+      await this.checkpoints.checkpoint(nodeId, result.patch?.edits.map((e) => e.path));
       const validation = result.cacheHit ? { passed: true } : await validate(packet, result, this.workDir);
 
       if (validation.passed) {
         graph.setStatus(nodeId, "success");
         node.result = result;
+
         if (!result.cacheHit) {
           this.patternCache.set(packet, result.output, result.provider, result.tokensIn, result.tokensOut, result.patch);
         }
@@ -211,7 +184,7 @@ export class ExecutionEngine {
         await this.checkpoints.rollback(nodeId);
         result = { ...result, success: false, error: result.error ?? validation.reason };
         node.result = result;
-        graph.markFailed(nodeId); // marks direct dependents 'blocked' — see TaskGraph docblock
+        graph.markFailed(nodeId);
       }
 
       const outcome: NodeOutcome = {
@@ -224,6 +197,7 @@ export class ExecutionEngine {
         dataBoundary: dataBoundaryFor(result.provider),
         result,
       };
+
       this.taskHistory.recordOutcome(outcome);
 
       if (!result.cacheHit) {
