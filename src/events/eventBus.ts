@@ -13,10 +13,7 @@ export class EventBus {
 
   async publish(event: ForgeEvent): Promise<void> {
     const handlers = this.handlers.get(event.type) ?? [];
-
-    for (const handler of handlers) {
-      await handler(event);
-    }
+    await Promise.allSettled(handlers.map(handler => Promise.resolve(handler(event))));
   }
 }
 
