@@ -13,10 +13,15 @@ export class LedgerStore {
   async list(): Promise<LedgerEntry[]> {
     try {
       const raw = await readFile(LEDGER_PATH, 'utf8');
-      return raw
-        .split('\n')
-        .filter(Boolean)
-        .map(line => JSON.parse(line));
+      const entries: LedgerEntry[] = [];
+      for (const line of raw.split('\n').filter(Boolean)) {
+        try {
+          entries.push(JSON.parse(line));
+        } catch {
+          continue;
+        }
+      }
+      return entries;
     } catch {
       return [];
     }
