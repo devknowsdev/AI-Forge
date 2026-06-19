@@ -14,7 +14,7 @@ const ROUTE_MAP = {
 
 export async function routeTask(input: string): Promise<RouteDecision> {
   const classification = await classifyTask(input);
-  const route = ROUTE_MAP[classification.taskType];
+  const route = ROUTE_MAP[classification.taskType] ?? ROUTE_MAP.reasoning;
 
   return {
     taskType: classification.taskType,
